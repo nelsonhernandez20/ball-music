@@ -1,0 +1,26 @@
+# Blueprint Render: servidor de juego + Next.js (solo Render, sin Vercel).
+# 1) Desplegá este Blueprint; cuando exista «ball-music-game», copiá su URL público HTTPS.
+# 2) En el servicio «ball-music-web» → Environment, definí antes del próximo build:
+#    NEXT_PUBLIC_GAME_SERVER y GAME_SERVER_URL = esa misma URL (sin / final).
+#    ADMIN_SECRET igual que en «ball-music-game» si usás el panel.
+# Tier gratis: cada servicio puede dormir tras ~15 min sin tráfico.
+services:
+  - type: web
+    name: ball-music-game
+    runtime: node
+    region: oregon
+    plan: free
+    rootDir: server
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+
+  - type: web
+    name: ball-music-web
+    runtime: node
+    region: oregon
+    plan: free
+    rootDir: web
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /

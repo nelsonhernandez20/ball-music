@@ -1,0 +1,13 @@
+{
+  "name": "ball-music",
+  "private": true,
+  "workspaces": ["web", "server"],
+  "scripts": {
+    "dev": "concurrently -n web,game -c blue,magenta \"npm run dev -w web\" \"npm run dev -w server\"",
+    "dev:web": "npm run dev -w web",
+    "dev:server": "npm run dev -w server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
