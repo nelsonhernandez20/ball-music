@@ -21,6 +21,7 @@ services:
     region: oregon
     plan: free
     rootDir: web
-    buildCommand: npm install && npm run build
+    # Render suele tener NODE_ENV=production: sin --include=dev omitís Tailwind; sin opcionales falla lightningcss en Linux.
+    buildCommand: npm install --include=dev --include=optional && npm run build
     startCommand: npm start
     healthCheckPath: /
