@@ -53,6 +53,10 @@ export type MatchPhase = "running" | "finished";
 export type GameSnapshot = {
   worldW: number;
   worldH: number;
+  /** >0 ⇒ plataformas/trazos/pickups se desplazan hacia abajo en Y; la nave no va “pegada” a la cinta. */
+  worldScrollPs: number;
+  /** Suma histórica de scroll (persistencia/diagnóstico); la física y el dibujo usan Y absolutas. */
+  worldScrollAccum: number;
   tick: number;
   players: PublicPlayer[];
   platforms: PublicPlatform[];

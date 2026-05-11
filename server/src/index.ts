@@ -13,6 +13,7 @@ import {
   schedulePersistRoom,
 } from "./persistence.js";
 import { registerPersistenceHooks, scheduleRoomPersist } from "./persistHooks.js";
+import { MUSIC_PRESETS } from "./musicCatalog.js";
 
 async function bootstrap() {
   loadEnv();
@@ -27,7 +28,11 @@ async function bootstrap() {
   app.use(express.json());
 
   const room = new GameRoom("live");
+  console.info(`[ball-music] sala creada: scroll vertical ${room.getWorldScrollPs()} px/s (0=mundo quieto)`);
   await hydrateRoomFromSupabase(room);
+  if (persistenceEnabled()) {
+    await persistRoomImmediate(room);
+  }
   room.beginMusicRound();
 
   const httpServer = createServer(app);
@@ -47,7 +52,13 @@ async function bootstrap() {
   }
 
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, players: room.players.size, max: 5 });
+    res.json({
+      ok: true,
+      players: room.players.size,
+      max: 5,
+      worldScrollPs: room.getWorldScrollPs(),
+      worldScrollAccum: room.getWorldScrollAccum(),
+    });
   });
 
   app.get("/admin/players", (req, res) => {
@@ -94,6 +105,88 @@ async function bootstrap() {
     res.json({ ok: true, player: result.player });
   });
 
+  app.get("/admin/music-presets", (req, res) => {
+    if (!requireAdmin(req.headers.authorization)) {
+      res.status(401).json({ error: "Sin autorización" });
+      return;
+    }
+    res.json({
+      presets: MUSIC_PRESETS,
+      current: {
+        musicPublicPath: room.musicPublicPath,
+        musicTrackTitle: room.musicTrackTitle,
+        musicTrackDurationMs: room.musicTrackDurationMs,
+      },
+    });
+  });
+
+  /** Reinicia sólo desde el panel HTTP (los jugadores en /play no pueden). */
+  app.post("/admin/restart-music-round", (_req, res) => {
+    if (!requireAdmin(_req.headers.authorization)) {
+      res.status(401).json({ error: "Sin autorización" });
+      return;
+    }
+    room.resetMusicRound();
+    res.json({ ok: true });
+  });
+
+  app.post("/admin/set-music", (req, res) => {
+    if (!requireAdmin(req.headers.authorization)) {
+      res.status(401).json({ error: "Sin autorización" });
+      return;
+    }
+    const body = req.body as Record<string, unknown> | undefined;
+    const presetId =
+      typeof body?.presetId === "string" ? body.presetId : undefined;
+    const publicPath =
+      typeof body?.publicPath === "string" ? body.publicPath : undefined;
+    const title = typeof body?.title === "string" ? body.title : undefined;
+    const durationMs = body?.durationMs;
+    const r = room.setMusicFromAdmin({
+      presetId,
+      publicPath,
+      title,
+      durationMs:
+        typeof durationMs === "number"
+          ? durationMs
+          : typeof durationMs === "string"
+            ? Number(durationMs)
+            : undefined,
+    });
+    if (!r.ok) {
+      res.status(400).json({ error: r.error });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  app.post("/admin/kick-player", (req, res) => {
+    if (!requireAdmin(req.headers.authorization)) {
+      res.status(401).json({ error: "Sin autorización" });
+      return;
+    }
+    const playerId = String(req.body?.playerId ?? "").trim();
+    if (!playerId) {
+      res.status(400).json({ error: "Falta playerId" });
+      return;
+    }
+    const result = room.kickPlayerById(playerId);
+    if (!result.ok) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    for (const sid of result.socketIds) {
+      const s = io.sockets.sockets.get(sid);
+      if (s) {
+        s.emit("kicked_from_room", {
+          message: "El streamer te quitó de la sala.",
+        });
+        s.disconnect(true);
+      }
+    }
+    res.json({ ok: true, player: result.kickedNick });
+  });
+
   io.on("connection", (socket) => {
     let playerId: string | null = null;
 
@@ -123,12 +216,6 @@ async function bootstrap() {
         trail: Boolean(input?.trail),
       };
       room.setInput(playerId, full);
-    });
-
-    socket.on("new_music_round", () => {
-      if (!playerId) return;
-      if (room.musicPhase !== "finished") return;
-      room.resetMusicRound();
     });
 
     socket.on("disconnect", () => {

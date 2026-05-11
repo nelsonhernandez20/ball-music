@@ -8,7 +8,16 @@ import type {
   PublicTrailSegment,
   TrailEnergyPickup,
 } from "./types.js";
+import { MUSIC_PRESETS } from "./musicCatalog.js";
 import { persistRoomNow, scheduleRoomPersist } from "./persistHooks.js";
+
+/** Velocidad Y del mundo (coords Y hacia abajo). Por defecto 0: asteroides quietos → la nave queda donde la soltás. `BALL_WORLD_SCROLL_PS≈48` reactiva la cinta. */
+function parseWorldScrollPsFromEnv(): number {
+  const raw = process.env.BALL_WORLD_SCROLL_PS?.trim();
+  if (!raw) return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
 
 const MAX_PLAYERS = 5;
 const WORLD_W = 480;
@@ -17,10 +26,9 @@ const PLAYER_R = 14;
 /** Obstáculos cuadrados destructores (lado aleatorio entre min y max). */
 const OBSTACLE_SIDE_MIN = 22;
 const OBSTACLE_SIDE_MAX = 32;
-/** Gravedad (Y crece hacia abajo). Sin empuje caés; ↑ acelera hacia arriba. */
-const G = 880;
+/** Sin gravedad: sin ↑/↓ la nave no deriva en Y; solo ↑/↓ aplican empuje ese tick. */
 const SHIP_THRUST_UP = 1780;
-/** Con ↓ acelera hacia abajo (retroceso / caída más rápida). */
+/** Con ↓ empuja hacia abajo (solo a propósito). */
 const SHIP_THRUST_DOWN = 1150;
 const SHIP_VY_CAP_UP = -520;
 const SHIP_VY_CAP_DN = 580;
@@ -31,8 +39,6 @@ const SHIP_VX_DRAG = 7.8;
 const WALL_BOUNCE_RETAIN = 0.86;
 /** Techo del área jugable — rebota al chocar hacia arriba. */
 const WORLD_CEILING_MARGIN = PLAYER_R + 10;
-/** La escena «baja»: las plataformas ganan velocidad positiva Y (coords con Y hacia abajo). */
-const WORLD_SCROLL_PS = 48;
 /** Rebote entre naves como dos pelotas (1 = elástico puro); <1 amortigua un poco. */
 const PLAYER_SHIP_RESTITUTION = 0.92;
 /** No aplicar rebote si se acercan muy despacio (evita jitter al reposar pegados). */
@@ -49,20 +55,24 @@ const VERT_GAP_JITTER = 10;
 const PLATFORM_SPAWN_MAX_DX_FROM_REF = 172;
 /** Trazo destructivo (cuadraditos tipo paint / TRON). */
 const TRAIL_SEG_SIZE = 12;
-const TRAIL_SAMPLE_DIST = 16;
-const TRAIL_ENERGY_DRAIN_PER_S = 1.05;
-const TRAIL_ENERGY_RECHARGE_PER_S = 0.11;
+/** Cuadrados por metro de recorrido: más alto ⇒ menos teselas por carga. */
+const TRAIL_SAMPLE_DIST = 32;
+/** Uso rápido de la barra mientras mantienen pintar (~1/leak = duración efectiva máx.). */
+const TRAIL_ENERGY_DRAIN_PER_S = 2.45;
+const TRAIL_ENERGY_RECHARGE_PER_S = 0.055;
+/** Costo extra cada vez que deposita un segmento además del drenado por segundo. */
+const TRAIL_ENERGY_PER_SEGMENT = 0.016;
+/** Umbral por debajo del cual ya no puede colocar el siguiente cuadro de trazo. */
+const TRAIL_ENERGY_DRAW_FLOOR = 0.068;
 const TRAIL_PICKUP_BONUS = 0.38;
-const TRAIL_MAX_SEGMENTS = 380;
+/** Límite global de teselas vivas para no tapar todo el nivel. */
+const TRAIL_MAX_SEGMENTS = 160;
 const PICKUP_RADIUS = 11;
 const PICKUP_SPAWN_EVERY_TICKS = 95;
-/** Duración efectiva extraída con ffprobe del MP3 (~208.008 s). */
-const MATCH_MUSIC_DURATION_MS = Math.round(208.008 * 1000);
 const MATCH_SCORE_PER_SECOND = 11;
-const MUSIC_PUBLIC_PATH = "/music/on-and-on-ncs.mp3";
-const MUSIC_TRACK_TITLE =
-  "Cartoon, Jéja — On & On (feat. Daniel Levi) · NCS";
 const SCORE_FOR_TRAIL_PICKUP = 55;
+
+const FIRST_MUSIC = MUSIC_PRESETS[0]!;
 
 const TICK_HZ = 25;
 export const TICK_MS = 1000 / TICK_HZ;
@@ -87,7 +97,8 @@ type PhysPlayer = PublicPlayer & {
 
 type TrailSeg = PublicTrailSegment;
 
-function countConnectedSlots(players: Map<string, PhysPlayer>) {
+/** Máximo 5 conexiones Socket.IO a la vez = 5 jugadores interactuando simultáneamente. */
+function countConnectedPlayers(players: Map<string, PhysPlayer>) {
   return [...players.values()].filter((p) => p.socketIds.size > 0).length;
 }
 
@@ -254,14 +265,23 @@ export class GameRoom {
   /** Trazos destructivos (autoritativos; mismas reglas de scroll que plataformas). */
   trailSegments: TrailSeg[] = [];
   trailPickups: TrailEnergyPickup[] = [];
+  /** PX/s del scroll mundial (`BALL_WORLD_SCROLL_PS`; 0 = asteroides quietos, nave fija al soltar ↑/↓). */
+  private readonly worldScrollPs = parseWorldScrollPsFromEnv();
   private pickupSpawnCooldown = PICKUP_SPAWN_EVERY_TICKS;
+  /** Integral del scroll (vacío / techo / encuadre cliente). Con scroll 0 no crece. */
+  private worldScrollAccum = 0;
 
   tick = 0;
 
   musicPhase: MatchPhase = "running";
   /** `Date.now()` cuando termina la ronda musical (servidor autoritativo). */
-  musicMatchEndsAtMs = Date.now() + MATCH_MUSIC_DURATION_MS;
+  musicMatchEndsAtMs = Date.now() + FIRST_MUSIC.durationMs;
   musicWinnerIds: string[] = [];
+
+  /** Ruta pública que el cliente usa como `src` (estático `/music/...` en Next). */
+  musicPublicPath = FIRST_MUSIC.publicPath;
+  musicTrackTitle = FIRST_MUSIC.title;
+  musicTrackDurationMs = FIRST_MUSIC.durationMs;
 
   timer: ReturnType<typeof setInterval> | null = null;
 
@@ -289,6 +309,8 @@ export class GameRoom {
     return {
       worldW: WORLD_W,
       worldH: WORLD_H,
+      worldScrollPs: this.worldScrollPs,
+      worldScrollAccum: this.worldScrollAccum,
       tick: this.tick,
       players: playersArr,
       platforms: platformsSorted,
@@ -297,9 +319,9 @@ export class GameRoom {
       musicMatchEndsAtUnixMs: this.musicMatchEndsAtMs,
       musicPhase: this.musicPhase,
       musicWinnerPlayerIds: [...this.musicWinnerIds],
-      musicTrackDurationMs: MATCH_MUSIC_DURATION_MS,
-      musicPublicPath: MUSIC_PUBLIC_PATH,
-      musicTrackTitle: MUSIC_TRACK_TITLE,
+      musicTrackDurationMs: this.musicTrackDurationMs,
+      musicPublicPath: this.musicPublicPath,
+      musicTrackTitle: this.musicTrackTitle,
     };
   }
 
@@ -307,7 +329,7 @@ export class GameRoom {
   beginMusicRound(): void {
     this.musicPhase = "running";
     this.musicWinnerIds = [];
-    this.musicMatchEndsAtMs = Date.now() + MATCH_MUSIC_DURATION_MS;
+    this.musicMatchEndsAtMs = Date.now() + this.musicTrackDurationMs;
     for (const p of this.players.values()) {
       p.score = 0;
     }
@@ -343,6 +365,7 @@ export class GameRoom {
     this.trailSegments = [];
     this.trailPickups = [];
     this.pickupSpawnCooldown = PICKUP_SPAWN_EVERY_TICKS;
+    this.worldScrollAccum = 0;
     this.spawnInitialPlatforms();
     for (const p of this.players.values()) {
       p.lives = 3;
@@ -362,8 +385,58 @@ export class GameRoom {
     this.broadcastStateNow();
   }
 
+  /**
+   * Cambia archivo/título/duración que el cliente reproducirá (estático en `/public/music` del front).
+   * No reinicia la ronda: usá `resetMusicRound` desde el panel para alinear duración y temporizador.
+   */
+  setMusicFromAdmin(opts: {
+    presetId?: string;
+    publicPath?: string;
+    title?: string;
+    durationMs?: number;
+  }): { ok: true } | { ok: false; error: string } {
+    let publicPath = "";
+    let title = "";
+    let durationMs = 0;
+
+    const pid = typeof opts.presetId === "string" ? opts.presetId.trim() : "";
+    if (pid) {
+      const pre = MUSIC_PRESETS.find((m) => m.id === pid);
+      if (!pre) return { ok: false, error: "presetId no reconocido." };
+      publicPath = pre.publicPath;
+      title = pre.title;
+      durationMs = pre.durationMs;
+    } else {
+      publicPath = String(opts.publicPath ?? "").trim();
+      title = String(opts.title ?? "").trim().slice(0, 200);
+      durationMs = Math.round(Number(opts.durationMs));
+      if (
+        !publicPath.startsWith("/music/") ||
+        publicPath.includes("..") ||
+        !/^\/music\/[\w\-./]+\.[a-zA-Z0-9]+$/i.test(publicPath)
+      ) {
+        return {
+          ok: false,
+          error: "publicPath debe ser como /music/tema.mp3 (letras, números, -, _ y subcarpetas).",
+        };
+      }
+      if (!Number.isFinite(durationMs) || durationMs < 20_000 || durationMs > 30 * 60_000) {
+        return { ok: false, error: "durationMs debe estar entre 20000 y 1800000 (20s–30min)." };
+      }
+      if (!title) title = publicPath.split("/").pop() ?? publicPath;
+    }
+
+    this.musicPublicPath = publicPath;
+    this.musicTrackTitle = title;
+    this.musicTrackDurationMs = durationMs;
+    this.broadcastStateNow();
+    scheduleRoomPersist(this);
+    return { ok: true };
+  }
+
   resetWorld() {
     this.tick = 0;
+    this.worldScrollAccum = 0;
     this.platforms = [];
     this.trailSegments = [];
     this.trailPickups = [];
@@ -422,8 +495,11 @@ export class GameRoom {
       };
     }
 
-    if (countConnectedSlots(this.players) >= MAX_PLAYERS) {
-      return { ok: false as const, reason: "Sala llena (máx 5 conectados)." };
+    if (countConnectedPlayers(this.players) >= MAX_PLAYERS) {
+      return {
+        ok: false as const,
+        reason: "Ya hay 5 jugadores con la partida abierta. Que alguien salga o esperá.",
+      };
     }
 
     const avatarUrl = avatarUrlRaw && /^https:\/\/.+/i.test(avatarUrlRaw) ? avatarUrlRaw.slice(0, 512) : null;
@@ -461,6 +537,26 @@ export class GameRoom {
 
   leavePlayer(playerId: string) {
     this.players.delete(playerId);
+  }
+
+  /**
+   * Saca al jugador por id (vivo o eliminado): quita personaje y sus trazos.
+   * El endpoint HTTP debe desconectar los `socketIds` devueltos.
+   */
+  kickPlayerById(playerIdRaw: string):
+    | { ok: true; kickedNick: string; socketIds: string[] }
+    | { ok: false; error: string } {
+    const playerId = playerIdRaw.trim();
+    if (!playerId) return { ok: false, error: "Falta id de jugador." };
+    const p = this.players.get(playerId);
+    if (!p) return { ok: false, error: "No hay jugador con ese id." };
+    const socketIds = [...p.socketIds];
+    const kickedNick = p.nickname;
+    this.players.delete(playerId);
+    this.trailSegments = this.trailSegments.filter((s) => s.ownerId !== playerId);
+    this.broadcastFn?.(this.snapshot());
+    persistRoomNow(this);
+    return { ok: true, kickedNick, socketIds };
   }
 
   setInput(playerId: string, input: ClientInput) {
@@ -542,6 +638,7 @@ export class GameRoom {
     platforms: PublicPlatform[];
     trailSegments: TrailSeg[];
     trailPickups: TrailEnergyPickup[];
+    worldScrollAccum: number;
   } {
     const players: PersistedPlayerBlob[] = [...this.players.values()].map((p) => ({
       id: p.id,
@@ -563,6 +660,7 @@ export class GameRoom {
       platforms: this.platforms.map((pl) => ({ ...pl })),
       trailSegments: this.trailSegments.map((t) => ({ ...t })),
       trailPickups: this.trailPickups.map((t) => ({ ...t })),
+      worldScrollAccum: this.worldScrollAccum,
     };
   }
 
@@ -572,6 +670,7 @@ export class GameRoom {
     rawPlatforms: PublicPlatform[],
     rawTrailSegments?: unknown,
     rawTrailPickups?: unknown,
+    persistedScrollAccum?: number,
   ): void {
     this.players.clear();
 
@@ -675,6 +774,41 @@ export class GameRoom {
     if (this.trailSegments.length > TRAIL_MAX_SEGMENTS) {
       this.trailSegments = this.trailSegments.slice(-TRAIL_MAX_SEGMENTS);
     }
+    const accum =
+      typeof persistedScrollAccum === "number" && Number.isFinite(persistedScrollAccum)
+        ? persistedScrollAccum
+        : 0;
+
+    /** Modo sin cinta pero BD con scroll alto: el cliente dibuja y-accum; si accum es viejo y scroll=0, todo queda corrido hasta restar ese offset de las coords. */
+    if (this.worldScrollPs === 0 && accum !== 0) {
+      for (const p of this.players.values()) {
+        if (Number.isFinite(p.y)) p.y -= accum;
+      }
+      for (const pl of this.platforms) {
+        if (Number.isFinite(pl.y)) pl.y -= accum;
+      }
+      for (const s of this.trailSegments) {
+        if (Number.isFinite(s.y)) s.y -= accum;
+      }
+      for (const pk of this.trailPickups) {
+        if (Number.isFinite(pk.y)) pk.y -= accum;
+      }
+      console.info(
+        `[persist] BALL_WORLD_SCROLL_PS=0 y accum guardado ${Math.round(accum)} → normalizado Y y accum=0`,
+      );
+      this.worldScrollAccum = 0;
+    } else {
+      this.worldScrollAccum = accum;
+    }
+  }
+
+  /** Devuelve px/s del scroll mundial (0 = campo quieto). Útil para /health y depuración. */
+  getWorldScrollPs(): number {
+    return this.worldScrollPs;
+  }
+
+  getWorldScrollAccum(): number {
+    return this.worldScrollAccum;
   }
 
   /** Elimina fantasmas que llevan demasiado desconectados (sin BD). */
@@ -828,18 +962,19 @@ export class GameRoom {
     this.tick += 1;
 
     for (const plat of this.platforms) {
-      plat.y += WORLD_SCROLL_PS * dt;
+      plat.y += this.worldScrollPs * dt;
     }
+    this.worldScrollAccum += this.worldScrollPs * dt;
 
     this.platforms = this.platforms.filter((pl) => pl.y - pl.h / 2 < WORLD_H + 120);
 
     for (const seg of this.trailSegments) {
-      seg.y += WORLD_SCROLL_PS * dt;
+      seg.y += this.worldScrollPs * dt;
     }
     this.trailSegments = this.trailSegments.filter((s) => s.y - s.h / 2 < WORLD_H + 120);
 
     for (const pk of this.trailPickups) {
-      pk.y += WORLD_SCROLL_PS * dt;
+      pk.y += this.worldScrollPs * dt;
     }
     this.trailPickups = this.trailPickups.filter((pk) => pk.y - PICKUP_RADIUS < WORLD_H + 100);
 
@@ -847,10 +982,12 @@ export class GameRoom {
     if (this.pickupSpawnCooldown <= 0) {
       this.pickupSpawnCooldown = PICKUP_SPAWN_EVERY_TICKS;
       if (this.trailPickups.length < 4 && Math.random() < 0.5) {
+        const ySpawn =
+          this.worldScrollPs > 0 ? -PICKUP_RADIUS - 6 : rndRange(120, WORLD_H - 130);
         this.trailPickups.push({
           id: nanoid(8),
           x: rndRange(PICKUP_RADIUS + 10, WORLD_W - PICKUP_RADIUS - 10),
-          y: -PICKUP_RADIUS - 6,
+          y: ySpawn,
         });
       }
     }
@@ -888,9 +1025,13 @@ export class GameRoom {
       if (lateralInput === 0) p.vx *= Math.exp(-SHIP_VX_DRAG * dt);
       p.vx = clamp(p.vx, -SHIP_VX_MAX, SHIP_VX_MAX);
 
-      p.vy += G * dt;
-      if (p.input.jump) p.vy -= SHIP_THRUST_UP * dt;
-      if (p.input.down) p.vy += SHIP_THRUST_DOWN * dt;
+      if (!p.input.jump && !p.input.down) {
+        /** ↑/↓ relativo al flujo que baja: sin tecla, no acumulás vy (pero el mundo sigue en cinta). */
+        p.vy = 0;
+      } else {
+        if (p.input.jump) p.vy -= SHIP_THRUST_UP * dt;
+        if (p.input.down) p.vy += SHIP_THRUST_DOWN * dt;
+      }
       p.vy = clamp(p.vy, SHIP_VY_CAP_UP, SHIP_VY_CAP_DN);
 
       p.x += p.vx * dt;
@@ -906,8 +1047,9 @@ export class GameRoom {
         if (p.vx > 0) p.vx *= -WALL_BOUNCE_RETAIN;
       }
 
-      if (p.y < WORLD_CEILING_MARGIN) {
-        p.y = WORLD_CEILING_MARGIN;
+      const ceilingAbs = WORLD_CEILING_MARGIN;
+      if (p.y < ceilingAbs) {
+        p.y = ceilingAbs;
         if (p.vy < 0) p.vy *= -WALL_BOUNCE_RETAIN * 0.94;
       }
     }
@@ -930,7 +1072,7 @@ export class GameRoom {
         p.trailEnergy = Math.min(1, p.trailEnergy + TRAIL_ENERGY_RECHARGE_PER_S * dt);
       } else if (p.trailEnergy > 0) {
         p.trailEnergy = Math.max(0, p.trailEnergy - TRAIL_ENERGY_DRAIN_PER_S * dt);
-        if (p.trailEnergy > 0.04) {
+        if (p.trailEnergy > TRAIL_ENERGY_DRAW_FLOOR) {
           const lx = p.trailLastX;
           const ly = p.trailLastY;
           if (
@@ -938,9 +1080,13 @@ export class GameRoom {
             ly == null ||
             Math.hypot(p.x - lx, p.y - ly) >= TRAIL_SAMPLE_DIST
           ) {
-            this.pushTrailSegment(p.id, p.x, p.y);
-            p.trailLastX = p.x;
-            p.trailLastY = p.y;
+            const nextEnergy = p.trailEnergy - TRAIL_ENERGY_PER_SEGMENT;
+            if (nextEnergy >= TRAIL_ENERGY_DRAW_FLOOR) {
+              p.trailEnergy = nextEnergy;
+              this.pushTrailSegment(p.id, p.x, p.y);
+              p.trailLastX = p.x;
+              p.trailLastY = p.y;
+            }
           }
         }
       }

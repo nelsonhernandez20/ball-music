@@ -27,7 +27,7 @@ export default function Home() {
           Ritmo orbital
         </h1>
         <p className="mt-3 text-center text-sm text-zinc-400">
-          Ritmo orbital tipo vertical shooter: gravedad + empuje arriba/abajo; nave siempre mirando al frente (↑ en pantalla).
+          Sin gravedad: la nave se queda donde la dejás salvo que empujes o te choquen. Obstáculos rojos y trazos ajenos quitan vida.
           Hasta 5 en sala; ideal desde el móvil con música de fondo.
         </p>
 

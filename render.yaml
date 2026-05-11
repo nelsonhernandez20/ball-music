@@ -3,6 +3,7 @@
 # 2) En el servicio «ball-music-web» → Environment, definí antes del próximo build:
 #    NEXT_PUBLIC_GAME_SERVER y GAME_SERVER_URL = esa misma URL (sin / final).
 #    ADMIN_SECRET igual que en «ball-music-game» si usás el panel.
+#    Opcional BALL_WORLD_SCROLL_PS=0 (por defecto en código): nivel quieto. ~48 para cinta en Y.
 # Tier gratis: cada servicio puede dormir tras ~15 min sin tráfico.
 services:
   - type: web

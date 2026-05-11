@@ -35,7 +35,7 @@ export async function hydrateRoomFromSupabase(room: GameRoom): Promise<void> {
     const sb = getClient();
     const { data, error } = await sb
       .from(TABLE)
-      .select("players, platforms, trail_segments, trail_pickups")
+      .select("players, platforms, trail_segments, trail_pickups, world_scroll_accum")
       .eq("slug", room.slug)
       .maybeSingle();
     if (error) {
@@ -46,11 +46,17 @@ export async function hydrateRoomFromSupabase(room: GameRoom): Promise<void> {
       return;
     }
     const plats = Array.isArray(data.platforms) ? (data.platforms as PublicPlatform[]) : [];
+    const scrollAccumRaw = Number(
+      (data as { world_scroll_accum?: unknown }).world_scroll_accum,
+    );
+    const persistedScrollAccum =
+      Number.isFinite(scrollAccumRaw) ? scrollAccumRaw : undefined;
     room.applyPersistenceBlobs(
       data.players as PersistedPlayerBlob[],
       plats,
       data.trail_segments,
       data.trail_pickups,
+      persistedScrollAccum,
     );
     console.log(`[persist] Sala «${room.slug}» restaurada (${data.players.length} jugadores).`);
   } catch (e) {
@@ -60,7 +66,8 @@ export async function hydrateRoomFromSupabase(room: GameRoom): Promise<void> {
 
 async function upsertRoom(room: GameRoom): Promise<void> {
   if (!persistenceEnabled()) return;
-  const { players, platforms, trailSegments, trailPickups } = room.getPersistenceBlobs();
+  const { players, platforms, trailSegments, trailPickups, worldScrollAccum } =
+    room.getPersistenceBlobs();
   try {
     const sb = getClient();
     const { error } = await sb.from(TABLE).upsert(
@@ -70,6 +77,7 @@ async function upsertRoom(room: GameRoom): Promise<void> {
         platforms,
         trail_segments: trailSegments,
         trail_pickups: trailPickups,
+        world_scroll_accum: worldScrollAccum,
         updated_at: new Date().toISOString(),
       },
       { onConflict: "slug" },

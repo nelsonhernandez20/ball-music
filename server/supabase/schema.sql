@@ -4,6 +4,7 @@ create table if not exists public.ball_music_room_state (
   slug text primary key,
   players jsonb not null default '[]'::jsonb,
   platforms jsonb not null default '[]'::jsonb,
+  world_scroll_accum double precision not null default 0,
   updated_at timestamptz not null default now()
 );
 

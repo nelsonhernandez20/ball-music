@@ -11,6 +11,10 @@ type MatchPhase = "running" | "finished";
 type GameSnapshot = {
   worldW: number;
   worldH: number;
+  /** px/s de la cinta en el servidor (0 = asteroides quietos). */
+  worldScrollPs?: number;
+  /** Solo telemetría/persistencia; las Y del snapshot son coords absolutas del lienzo (sin restar accum). */
+  worldScrollAccum?: number;
   tick?: number;
   players: Array<{
     id: string;
@@ -137,7 +141,7 @@ type TouchInputRef = MutableRefObject<{
   trail: boolean;
 }>;
 
-/** Joystick táctil: ↔ esquivar; ↑ empuje arriba; ↓ empuje abajo. */
+/** Joystick táctil: ↔ lateral; ↑/↓ empujan (sin gravedad: al soltar te frenás y podés quedar quieto). */
 function MobileJoystick({
   inputRef,
   emitInput,
@@ -148,7 +152,7 @@ function MobileJoystick({
   const baseRef = useRef<HTMLDivElement>(null);
   const activeId = useRef<number | null>(null);
   const [knob, setKnob] = useState({ x: 0, y: 0 });
-  const dead = 0.22;
+  const dead = 0.32;
 
   const apply = (clientX: number, clientY: number) => {
     const el = baseRef.current;
@@ -212,7 +216,7 @@ function MobileJoystick({
       onPointerCancel={() => release()}
       onLostPointerCapture={() => release()}
       role="group"
-      aria-label="Joystick: arrastrá para esquivar, arriba para subir y abajo para bajar"
+      aria-label="Joystick: lateral y empuje arriba o abajo; al soltar se frena la deriva"
     >
       <div
         className="pointer-events-none absolute left-1/2 top-1/2 size-[2.85rem] rounded-full border border-cyan-400/35 bg-gradient-to-br from-zinc-600/95 to-zinc-900/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
@@ -342,6 +346,16 @@ function InnerPlay() {
       setStatus("Rechazado");
     });
 
+    socket.on("kicked_from_room", (payload: { message?: string }) => {
+      if (!effectActive) return;
+      effectActive = false;
+      socket.io.reconnection(false);
+      playerIdRef.current = null;
+      setDeniedReason(payload?.message ?? "El streamer te quitó de la sala.");
+      setStatus("Fuera de la sala");
+      socket.disconnect();
+    });
+
     socket.on("state", (snap: GameSnapshot) => {
       if (!effectActive) return;
       snapshotRef.current = snap;
@@ -400,6 +414,18 @@ function InnerPlay() {
     };
     emitInputRef.current = sendInput;
 
+    const clearHeldKeys = () => {
+      inputRef.current = { left: false, right: false, jump: false, down: false, trail: false };
+      if (socket.connected && playerIdRef.current) {
+        socket.emit("input", { left: false, right: false, jump: false, down: false, trail: false });
+      }
+    };
+
+    const onWinBlur = () => clearHeldKeys();
+    const onVis = () => {
+      if (document.visibilityState === "hidden") clearHeldKeys();
+    };
+
     const keyDown = (e: KeyboardEvent) => {
       if (e.code === "ArrowLeft" || e.code === "KeyA") {
         e.preventDefault();
@@ -437,6 +463,8 @@ function InnerPlay() {
 
     window.addEventListener("keydown", keyDown);
     window.addEventListener("keyup", keyUp);
+    window.addEventListener("blur", onWinBlur);
+    document.addEventListener("visibilitychange", onVis);
 
     let raf = 0;
 
@@ -463,8 +491,10 @@ function InnerPlay() {
       let targetMaxW: number;
       let targetMaxH: number;
       if (mobilePlay) {
-        targetMaxW = Math.max(240, vp.w - 16);
-        targetMaxH = Math.max(220, vp.h - Math.min(vp.h * 0.33, 300));
+        targetMaxW = Math.max(280, vp.w - 6);
+        /** ~14% o 120px como mucho para HUD y controles; antes ~33% achicaba demasiado el lienzo. */
+        const uiReserve = Math.min(vp.h * 0.14, 120);
+        targetMaxH = Math.max(340, vp.h - uiReserve);
       } else {
         targetMaxW = Math.max(320, vp.w - 96);
         targetMaxH = Math.min(vp.h * 0.76, window.innerHeight * 0.78, worldH * 1.05);
@@ -494,11 +524,13 @@ function InnerPlay() {
           ctx.font = "14px system-ui,sans-serif";
           ctx.fillText("Sincronizando con la sala…", worldW / 2 - 120, worldH / 2);
         } else {
+          const sy = (y: number) => y;
+
           ctx.fillStyle = "rgba(255,94,71,0.38)";
           ctx.strokeStyle = "rgba(255,150,124,0.22)";
           for (const plat of snap.platforms) {
-            ctx.fillRect(plat.x - plat.w / 2, plat.y - plat.h / 2, plat.w, plat.h);
-            ctx.strokeRect(plat.x - plat.w / 2, plat.y - plat.h / 2, plat.w, plat.h);
+            ctx.fillRect(plat.x - plat.w / 2, sy(plat.y) - plat.h / 2, plat.w, plat.h);
+            ctx.strokeRect(plat.x - plat.w / 2, sy(plat.y) - plat.h / 2, plat.w, plat.h);
           }
 
           const segments = snap.trailSegments ?? [];
@@ -509,10 +541,10 @@ function InnerPlay() {
             ctx.shadowBlur = 5 / scale;
             ctx.strokeStyle = `hsl(${th} 90% 62%)`;
             ctx.lineWidth = Math.max(1, 1.5 / scale);
-            ctx.strokeRect(seg.x - seg.w / 2, seg.y - seg.h / 2, seg.w, seg.h);
+            ctx.strokeRect(seg.x - seg.w / 2, sy(seg.y) - seg.h / 2, seg.w, seg.h);
             ctx.shadowBlur = 0;
             ctx.fillStyle = `hsla(${th} 100% 55% / 0.2)`;
-            ctx.fillRect(seg.x - seg.w / 2, seg.y - seg.h / 2, seg.w, seg.h);
+            ctx.fillRect(seg.x - seg.w / 2, sy(seg.y) - seg.h / 2, seg.w, seg.h);
             ctx.restore();
           }
 
@@ -520,7 +552,7 @@ function InnerPlay() {
             ctx.save();
             ctx.fillStyle = "rgba(250, 204, 21, 0.88)";
             ctx.beginPath();
-            ctx.arc(pk.x, pk.y, 11, 0, Math.PI * 2);
+            ctx.arc(pk.x, sy(pk.y), 11, 0, Math.PI * 2);
             ctx.fill();
             ctx.strokeStyle = "rgba(254, 249, 195, 0.95)";
             ctx.lineWidth = 1 / scale;
@@ -537,7 +569,7 @@ function InnerPlay() {
             if (pl.eliminated) continue;
             if (pl.connected === false && pl.id !== myId) continue;
             const hue = hashHue(pl.id);
-            drawSpaceship(ctx, scale, pl.x, pl.y, hue, pl.invulnTicks ?? 0, nowMs);
+            drawSpaceship(ctx, scale, pl.x, sy(pl.y), hue, pl.invulnTicks ?? 0, nowMs);
 
             if (myId && pl.id === myId) {
               const te = typeof pl.trailEnergy === "number" ? pl.trailEnergy : 1;
@@ -545,7 +577,7 @@ function InnerPlay() {
               const bw = 44;
               const bh = 5;
               const bx = pl.x - bw / 2;
-              const by = pl.y - 38;
+              const by = sy(pl.y) - 38;
               ctx.fillStyle = "rgba(15,23,42,0.72)";
               ctx.fillRect(bx, by, bw, bh);
               ctx.fillStyle =
@@ -560,14 +592,14 @@ function InnerPlay() {
 
             ctx.strokeStyle = "rgba(255,255,255,0.14)";
             ctx.lineWidth = 1 / scale;
-            ctx.strokeText(pl.nickname, pl.x + 22, pl.y + 6);
+            ctx.strokeText(pl.nickname, pl.x + 22, sy(pl.y) + 6);
             ctx.fillStyle = "rgba(246,246,246,0.95)";
-            ctx.fillText(pl.nickname, pl.x + 22, pl.y + 6);
+            ctx.fillText(pl.nickname, pl.x + 22, sy(pl.y) + 6);
 
             const pts = typeof pl.score === "number" && Number.isFinite(pl.score) ? Math.round(pl.score) : 0;
             const hud = `${pts} pts · ${pl.lives}♥  ${pl.shieldCharges > 0 ? "🛡" + pl.shieldCharges + " " : ""}`;
             ctx.fillStyle = "rgba(246,246,246,0.55)";
-            ctx.fillText(hud, pl.x + 22, pl.y + 20);
+            ctx.fillText(hud, pl.x + 22, sy(pl.y) + 20);
           }
         }
       }
@@ -581,6 +613,8 @@ function InnerPlay() {
       window.clearInterval(loop);
       window.removeEventListener("keydown", keyDown);
       window.removeEventListener("keyup", keyUp);
+      window.removeEventListener("blur", onWinBlur);
+      document.removeEventListener("visibilitychange", onVis);
       socket.disconnect();
       socketRef.current = null;
     };
@@ -658,8 +692,10 @@ function InnerPlay() {
       {/* Móvil: una línea estática antes del lienzo — no cubre el juego */}
       {!deniedReason && !(eliminated || roundFinished) ? (
         <p className="xl-mouse:hidden mx-auto max-w-lg min-h-[2.75rem] w-full shrink-0 px-2 text-center text-[10px] leading-snug text-zinc-500">
-          <strong className="text-zinc-300">Empuje arriba</strong> (↑ / joystick arriba);{" "}
-          <strong className="text-zinc-300">rojos + trazos ajenos</strong> duelen vida; violeta{" "}
+          <strong className="text-zinc-300">Sin gravedad</strong>: sin ↑/↓ no te movés en vertical. Los cuadrados rojos están{" "}
+          <strong className="text-zinc-300">quietos</strong> (salvo que el servidor tenga modo cinta con{" "}
+          <code className="text-zinc-400">BALL_WORLD_SCROLL_PS</code>).{" "}
+          <strong className="text-zinc-300">Rojos + trazos ajenos</strong> quitan vida; violeta{" "}
           <strong className="text-zinc-300">Traza</strong>.
         </p>
       ) : null}
@@ -669,7 +705,7 @@ function InnerPlay() {
           <canvas
             ref={canvasRef}
             className="block max-w-full rounded-lg shadow-lg shadow-black/60"
-            aria-label="Mini runner orbital: esquivar cuadrados destructores"
+            aria-label="Mini arena: esquivar cuadrados destructores, sin gravedad"
           />
         </div>
       ) : null}
@@ -680,13 +716,9 @@ function InnerPlay() {
           <p className="text-xs text-zinc-400">
             Ganan quienes llegaron con más puntaje: {winnerNicknames.length ? winnerNicknames.join(", ") : "nadie en sala"}
           </p>
-          <button
-            type="button"
-            className="mx-auto rounded-xl border border-white/15 bg-emerald-800/85 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-700/90"
-            onClick={() => socketRef.current?.emit("new_music_round")}
-          >
-            Otra partida (reinicia la sala y la música)
-          </button>
+          <p className="text-xs text-zinc-500">
+            El streamer puede iniciar una ronda nueva desde el <strong className="text-zinc-400">panel del stream</strong> (no desde acá).
+          </p>
         </div>
       ) : null}
 
@@ -709,13 +741,14 @@ function InnerPlay() {
       {/* Escritorio: ayuda después del lienzo */}
       {!deniedReason ? (
         <p className="mx-auto hidden max-w-lg px-4 pb-8 text-center text-xs text-zinc-500 xl-mouse:block">
-          <strong className="text-zinc-300">Gravedad</strong> te lleva abajo. Mantené{" "}
-          <strong className="text-zinc-300">↑ / espacio / W</strong> para{" "}
-          <strong className="text-zinc-300">acelerar hacia arriba</strong>; <strong className="text-zinc-300">↓ / S</strong> acelera hacia
-          abajo. <strong className="text-zinc-300">← →</strong> esquivan lateral.{" "}
+          <strong className="text-zinc-300">Sin gravedad</strong>: sin ↑/↓ la nave no se mueve sola en Y. Por defecto los obstáculos no bajan{" "}
+          (modo tranquilo); el streamer puede poner{" "}
+          <code className="text-zinc-400">BALL_WORLD_SCROLL_PS≈48</code> para reactivar el flujo vertical.{" "}
+          <strong className="text-zinc-300">↑ / espacio / W</strong> y <strong className="text-zinc-300">↓ / S</strong> empujan arriba/abajo;{" "}
+          <strong className="text-zinc-300">← →</strong> lateral.{" "}
           <strong className="text-zinc-300">E</strong> (mantener) pinta un{" "}
-          <strong className="text-zinc-300">trazo destructor</strong> estilo TRON (gasta la barra cyan; recarga sola con orbes dorados).
-          Los cuadrados rojos bajan; no te vayas mucho abajo o perdés vida.
+          <strong className="text-zinc-300">trazo destructor</strong> (barra cyan; orbes dorados recargan).
+          Los cuadrados rojos se acercan con el escenario; chocarlos o caer abajo quita vida. Choques entre naves rebotan.
         </p>
       ) : null}
 
